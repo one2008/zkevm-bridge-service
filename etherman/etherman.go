@@ -370,3 +370,8 @@ func (etherMan *Client) GetNetworkID(ctx context.Context) (uint, error) {
 	}
 	return uint(networkID), nil
 }
+
+// GetTrustedSequencerURL Gets the trusted sequencer url from rollup smc
+func (etherMan *Client) GetTrustedSequencerURL() (string, error) {
+	return etherMan.PolygonZkEVM.TrustedSequencerURL(&bind.CallOpts{Pending: false})
+}

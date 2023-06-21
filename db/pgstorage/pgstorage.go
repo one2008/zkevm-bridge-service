@@ -557,3 +557,107 @@ func (p *PostgresStorage) UpdateDepositsStatusForTesting(ctx context.Context, db
 	_, err := p.getExecQuerier(dbTx).Exec(ctx, updateDepositsStatusSQL)
 	return err
 }
+
+// UpdateL1DepositsStatus updates the ready_for_claim status of L1 deposits.
+func (p *PostgresStorage) UpdateL1DepositsStatus(ctx context.Context, exitRoot []byte, dbTx pgx.Tx) ([]*etherman.Deposit, error) {
+	const updateDepositsStatusSQL = `UPDATE sync.deposit SET ready_for_claim = true 
+		WHERE deposit_cnt <=
+			(SELECT deposit_cnt FROM mt.root WHERE root = $1 AND network = 0) 
+			AND network_id = 0 AND ready_for_claim = false
+			RETURNING leaf_type, orig_net, orig_addr, amount, dest_net, dest_addr, deposit_cnt, block_id, network_id, tx_hash, metadata, ready_for_claim;`
+	rows, err := p.getExecQuerier(dbTx).Query(ctx, updateDepositsStatusSQL, exitRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	deposits := make([]*etherman.Deposit, 0, len(rows.RawValues()))
+	for rows.Next() {
+		var (
+			deposit etherman.Deposit
+			amount  string
+		)
+		err = rows.Scan(&deposit.LeafType, &deposit.OriginalNetwork, &deposit.OriginalAddress, &amount, &deposit.DestinationNetwork, &deposit.DestinationAddress, &deposit.DepositCount, &deposit.BlockID, &deposit.NetworkID, &deposit.TxHash, &deposit.Metadata, &deposit.ReadyForClaim)
+		if err != nil {
+			return nil, err
+		}
+		deposit.Amount, _ = new(big.Int).SetString(amount, 10) //nolint:gomnd
+		deposits = append(deposits, &deposit)
+	}
+	return deposits, nil
+}
+
+// UpdateL2DepositsStatus updates the ready_for_claim status of L2 deposits.
+func (p *PostgresStorage) UpdateL2DepositsStatus(ctx context.Context, exitRoot []byte, networkID uint, dbTx pgx.Tx) error {
+	const updateDepositsStatusSQL = `UPDATE sync.deposit SET ready_for_claim = true
+		WHERE deposit_cnt <=
+			(SELECT deposit_cnt FROM mt.root WHERE root = $1 AND network = $2)
+			AND network_id = $2 AND ready_for_claim = false;`
+	_, err := p.getExecQuerier(dbTx).Exec(ctx, updateDepositsStatusSQL, exitRoot, networkID)
+	return err
+}
+
+// AddClaimTx adds a claim monitored transaction to the storage.
+func (p *PostgresStorage) AddClaimTx(ctx context.Context, mTx ctmtypes.MonitoredTx, dbTx pgx.Tx) error {
+	const addMonitoredTxSQL = `INSERT INTO sync.monitored_txs 
+		(id, block_id, from_addr, to_addr, nonce, value, data, gas, status, history, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
+	_, err := p.getExecQuerier(dbTx).Exec(ctx, addMonitoredTxSQL, mTx.ID, mTx.BlockID, mTx.From, mTx.To, mTx.Nonce, mTx.Value.String(), mTx.Data, mTx.Gas, mTx.Status, pq.Array(mTx.HistoryHashSlice()), time.Now().UTC(), time.Now().UTC())
+	return err
+}
+
+// UpdateClaimTx updates a claim monitored transaction in the storage.
+func (p *PostgresStorage) UpdateClaimTx(ctx context.Context, mTx ctmtypes.MonitoredTx, dbTx pgx.Tx) error {
+	const updateMonitoredTxSQL = `UPDATE sync.monitored_txs 
+		SET block_id = $2
+		, from_addr = $3
+		, to_addr = $4
+		, nonce = $5
+		, value = $6
+		, data = $7
+		, gas = $8
+		, status = $9
+		, history = $10
+		, updated_at = $11
+		WHERE id = $1`
+	_, err := p.getExecQuerier(dbTx).Exec(ctx, updateMonitoredTxSQL, mTx.ID, mTx.BlockID, mTx.From, mTx.To, mTx.Nonce, mTx.Value.String(), mTx.Data, mTx.Gas, mTx.Status, pq.Array(mTx.HistoryHashSlice()), time.Now().UTC())
+	return err
+}
+
+// GetClaimTxsByStatus gets the monitored transactions by status.
+func (p *PostgresStorage) GetClaimTxsByStatus(ctx context.Context, statuses []ctmtypes.MonitoredTxStatus, dbTx pgx.Tx) ([]ctmtypes.MonitoredTx, error) {
+	const getMonitoredTxsSQL = "SELECT * FROM sync.monitored_txs WHERE status = ANY($1) ORDER BY created_at ASC"
+	rows, err := p.getExecQuerier(dbTx).Query(ctx, getMonitoredTxsSQL, pq.Array(statuses))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return []ctmtypes.MonitoredTx{}, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	mTxs := make([]ctmtypes.MonitoredTx, 0, len(rows.RawValues()))
+	for rows.Next() {
+		var (
+			value   string
+			history [][]byte
+		)
+		mTx := ctmtypes.MonitoredTx{}
+		err = rows.Scan(&mTx.ID, &mTx.BlockID, &mTx.From, &mTx.To, &mTx.Nonce, &value, &mTx.Data, &mTx.Gas, &mTx.Status, pq.Array(&history), &mTx.CreatedAt, &mTx.UpdatedAt)
+		if err != nil {
+			return mTxs, err
+		}
+		mTx.Value, _ = new(big.Int).SetString(value, 10) //nolint:gomnd
+		mTx.History = make(map[common.Hash]bool)
+		for _, h := range history {
+			mTx.History[common.BytesToHash(h)] = true
+		}
+		mTxs = append(mTxs, mTx)
+	}
+
+	return mTxs, nil
+}
+
+// UpdateDepositsStatusForTesting updates the ready_for_claim status of all deposits for testing.
+func (p *PostgresStorage) UpdateDepositsStatusForTesting(ctx context.Context, dbTx pgx.Tx) error {
+	const updateDepositsStatusSQL = "UPDATE sync.deposit SET ready_for_claim = true;"
+	_, err := p.getExecQuerier(dbTx).Exec(ctx, updateDepositsStatusSQL)
+	return err
+}
