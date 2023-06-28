@@ -27,10 +27,7 @@ const (
 	mtHeight        = 32
 	cacheSize       = 1000
 	LeafTypeMessage = uint8(1)
-<<<<<<< HEAD
 	maxRetries      = 10
-=======
->>>>>>> main
 )
 
 // ClaimTxManager is the claim transaction manager for L2.
