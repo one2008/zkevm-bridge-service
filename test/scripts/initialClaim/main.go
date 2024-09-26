@@ -29,6 +29,10 @@ const (
 	l2NetworkURL     = "http://localhost:8123"
 	bridgeURL        = "http://localhost:8080"
 
+	forkID = 4
+
+	l2GasLimit = 1000000
+
 	mtHeight      = 32
 	miningTimeout = 180
 )
@@ -78,6 +82,10 @@ func main() {
 	}
 	log.Info("Sending claim tx...")
 	a, _ := big.NewInt(0).SetString(bridgeData.Amount, 0)
+	metadata, err := hex.DecodeHex(bridgeData.Metadata)
+	if err != nil {
+		log.Fatal("error converting metadata to bytes. Error: ", err)
+	}
 	e := etherman.Deposit{
 		LeafType:           uint8(bridgeData.LeafType),
 		OriginalNetwork:    uint(bridgeData.OrigNet),
@@ -89,20 +97,24 @@ func main() {
 		BlockNumber:        bridgeData.BlockNum,
 		NetworkID:          uint(bridgeData.NetworkId),
 		TxHash:             common.HexToHash(bridgeData.TxHash),
-		Metadata:           []byte(bridgeData.Metadata),
+		Metadata:           metadata,
 		ReadyForClaim:      bridgeData.ReadyForClaim,
 	}
-	tx, err := c.BuildSendClaim(ctx, &e, smt, globalExitRoot, auth)
+	tx, err := c.BuildSendClaim(ctx, &e, smt, globalExitRoot, 0, 0, l2GasLimit, auth)
 	if err != nil {
 		log.Fatal("error: ", err)
 	}
+	log.Info("L2 tx.Nonce: ", tx.Nonce())
+	log.Info("L2 tx.GasPrice: ", tx.GasPrice())
+	log.Info("L2 tx.Gas: ", tx.Gas())
+	log.Info("L2 tx.Hash: ", tx.Hash())
 	b, err := tx.MarshalBinary()
 	if err != nil {
 		log.Fatal("error: ", err)
 	}
 	encoded := hex.EncodeToHex(b)
 	log.Info("tx encoded: ", encoded)
-	byt, err := state.EncodeTransaction(*tx)
+	byt, err := state.EncodeTransaction(*tx, state.MaxEffectivePercentage, forkID)
 	if err != nil {
 		log.Fatal("error: ", err)
 	}

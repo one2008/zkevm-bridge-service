@@ -32,7 +32,6 @@ func (p *PostgresStorage) getExecQuerier(dbTx pgx.Tx) execQuerier {
 
 // NewPostgresStorage creates a new Storage DB
 func NewPostgresStorage(cfg Config) (*PostgresStorage, error) {
-	log.Debugf("Create PostgresStorage with Config: %v\n", cfg)
 	config, err := pgxpool.ParseConfig(fmt.Sprintf("postgres://%s:%s@%s:%s/%s?pool_max_conns=%d", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Name, cfg.MaxConns))
 	if err != nil {
 		log.Errorf("Unable to parse DB config: %v\n", err)
@@ -83,32 +82,6 @@ func (p *PostgresStorage) GetLastBlock(ctx context.Context, networkID uint, dbTx
 	return &block, err
 }
 
-// GetLastBatchNumber gets the last batch number.
-func (p *PostgresStorage) GetLastBatchNumber(ctx context.Context, dbTx pgx.Tx) (uint64, error) {
-	var batchNumber uint64
-	const getLastBatchNumberSQL = "SELECT coalesce(max(batch_num),0) as batch FROM sync.batch"
-
-	e := p.getExecQuerier(dbTx)
-	err := e.QueryRow(ctx, getLastBatchNumberSQL).Scan(&batchNumber)
-
-	return batchNumber, err
-}
-
-// GetBatchByNumber gets the specific batch by the batch number.
-func (p *PostgresStorage) GetBatchByNumber(ctx context.Context, batchNumber uint64, dbTx pgx.Tx) (*etherman.Batch, error) {
-	var batch etherman.Batch
-	const getBatchByNumberSQL = "SELECT batch_num, sequencer, raw_tx_data, timestamp, global_exit_root FROM sync.batch WHERE batch_num = $1"
-
-	e := p.getExecQuerier(dbTx)
-	err := e.QueryRow(ctx, getBatchByNumberSQL, batchNumber).Scan(
-		&batch.BatchNumber, &batch.Coinbase, &batch.BatchL2Data, &batch.Timestamp, &batch.GlobalExitRoot)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, gerror.ErrStorageNotFound
-	}
-
-	return &batch, err
-}
-
 // AddBlock adds a new block to the storage.
 func (p *PostgresStorage) AddBlock(ctx context.Context, block *etherman.Block, dbTx pgx.Tx) (uint64, error) {
 	var blockID uint64
@@ -126,39 +99,6 @@ func (p *PostgresStorage) AddBlock(ctx context.Context, block *etherman.Block, d
 	}
 
 	return blockID, err
-}
-
-// AddBatch adds a new batch to the storage.
-func (p *PostgresStorage) AddBatch(ctx context.Context, batch *etherman.Batch, dbTx pgx.Tx) error {
-	const addBatchSQL = "INSERT INTO sync.batch (batch_num, sequencer, raw_tx_data, timestamp, global_exit_root) VALUES ($1, $2, $3, $4, $5)"
-	e := p.getExecQuerier(dbTx)
-	_, err := e.Exec(ctx, addBatchSQL, batch.BatchNumber, batch.Coinbase, batch.BatchL2Data, batch.Timestamp, batch.GlobalExitRoot)
-	return err
-}
-
-// AddVerifiedBatch adds a new verified batch.
-func (p *PostgresStorage) AddVerifiedBatch(ctx context.Context, verifiedBatch *etherman.VerifiedBatch, dbTx pgx.Tx) error {
-	const addVerifiedBatchSQL = "INSERT INTO sync.verified_batch (batch_num, aggregator, tx_hash, block_id) VALUES ($1, $2, $3, $4)"
-	e := p.getExecQuerier(dbTx)
-	_, err := e.Exec(ctx, addVerifiedBatchSQL, verifiedBatch.BatchNumber, verifiedBatch.Aggregator, verifiedBatch.TxHash, verifiedBatch.BlockID)
-
-	return err
-}
-
-// GetLastVerifiedBatch gets last verified batch
-func (p *PostgresStorage) GetLastVerifiedBatch(ctx context.Context, dbTx pgx.Tx) (*etherman.VerifiedBatch, error) {
-	const query = "SELECT block_id, batch_num, tx_hash, aggregator FROM sync.verified_batch ORDER BY batch_num DESC LIMIT 1"
-	var (
-		verifiedBatch etherman.VerifiedBatch
-	)
-	e := p.getExecQuerier(dbTx)
-	err := e.QueryRow(ctx, query).Scan(&verifiedBatch.BlockID, &verifiedBatch.BatchNumber, &verifiedBatch.TxHash, &verifiedBatch.Aggregator)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, gerror.ErrStorageNotFound
-	} else if err != nil {
-		return nil, err
-	}
-	return &verifiedBatch, nil
 }
 
 // AddGlobalExitRoot adds a new ExitRoot to the db.
@@ -245,48 +185,6 @@ func (p *PostgresStorage) GetNumberDeposits(ctx context.Context, networkID uint,
 	const getNumDepositsSQL = "SELECT coalesce(MAX(deposit_cnt), -1) FROM sync.deposit as d INNER JOIN sync.block as b ON d.network_id = b.network_id AND d.block_id = b.id WHERE d.network_id = $1 AND b.block_num <= $2"
 	err := p.getExecQuerier(dbTx).QueryRow(ctx, getNumDepositsSQL, networkID, blockNumber).Scan(&nDeposits)
 	return uint64(nDeposits + 1), err
-}
-
-// GetNextForcedBatches gets the next forced batches from the queue.
-func (p *PostgresStorage) GetNextForcedBatches(ctx context.Context, nextForcedBatches int, dbTx pgx.Tx) ([]etherman.ForcedBatch, error) {
-	const getNextForcedBatchesSQL = "SELECT forced_batch_num, global_exit_root, raw_tx_data, sequencer, batch_num, block_id, received_at FROM sync.forced_batch INNER JOIN sync.block ON sync.block.id = sync.forced_batch.block_id WHERE batch_num IS NULL ORDER BY forced_batch_num LIMIT $1"
-	e := p.getExecQuerier(dbTx)
-	// Get the next forced batches
-	rows, err := e.Query(ctx, getNextForcedBatchesSQL, nextForcedBatches)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, gerror.ErrStorageNotFound
-	} else if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	batches := make([]etherman.ForcedBatch, 0, len(rows.RawValues()))
-	var forcedBatch etherman.ForcedBatch
-	for rows.Next() {
-		err := rows.Scan(&forcedBatch.ForcedBatchNumber, &forcedBatch.GlobalExitRoot, &forcedBatch.RawTxsData, &forcedBatch.Sequencer, &forcedBatch.BatchNumber, &forcedBatch.BlockID, &forcedBatch.ForcedAt)
-		if err != nil {
-			return nil, err
-		}
-		batches = append(batches, forcedBatch)
-	}
-
-	return batches, nil
-}
-
-// AddBatchNumberInForcedBatch updates the forced_batch table with the batchNumber.
-func (p *PostgresStorage) AddBatchNumberInForcedBatch(ctx context.Context, forceBatchNumber, batchNumber uint64, dbTx pgx.Tx) error {
-	const addBatchNumberInForcedBatchSQL = "UPDATE sync.forced_batch SET batch_num = $2 WHERE forced_batch_num = $1"
-	e := p.getExecQuerier(dbTx)
-	_, err := e.Exec(ctx, addBatchNumberInForcedBatchSQL, forceBatchNumber, batchNumber)
-	return err
-}
-
-// AddForcedBatch adds a new ForcedBatch to the db.
-func (p *PostgresStorage) AddForcedBatch(ctx context.Context, forcedBatch *etherman.ForcedBatch, dbTx pgx.Tx) error {
-	const addForcedBatchSQL = "INSERT INTO sync.forced_batch (forced_batch_num, global_exit_root, raw_tx_data, sequencer, batch_num, block_id) VALUES ($1, $2, $3, $4, $5, $6)"
-	_, err := p.getExecQuerier(dbTx).Exec(ctx, addForcedBatchSQL, forcedBatch.ForcedBatchNumber, forcedBatch.GlobalExitRoot, forcedBatch.RawTxsData, forcedBatch.Sequencer, forcedBatch.BatchNumber, forcedBatch.BlockID)
-	return err
 }
 
 // AddTrustedGlobalExitRoot adds new global exit root which comes from the trusted sequencer.
@@ -548,20 +446,6 @@ func (p *PostgresStorage) GetDepositCount(ctx context.Context, destAddr string, 
 	return depositCount, err
 }
 
-// ResetTrustedState resets trusted batches from the storage.
-func (p *PostgresStorage) ResetTrustedState(ctx context.Context, batchNumber uint64, dbTx pgx.Tx) error {
-	const (
-		resetTrustedStateSQL = "DELETE FROM sync.batch WHERE batch_num > $1"
-		updateForcedBatchSQL = "UPDATE sync.forced_batch SET batch_num = NULL WHERE batch_num > $1"
-	)
-	_, err := p.getExecQuerier(dbTx).Exec(ctx, resetTrustedStateSQL, batchNumber)
-	if err != nil {
-		return err
-	}
-	_, err = p.getExecQuerier(dbTx).Exec(ctx, updateForcedBatchSQL, batchNumber)
-	return err
-}
-
 // UpdateBlocksForTesting updates the hash of blocks.
 func (p *PostgresStorage) UpdateBlocksForTesting(ctx context.Context, networkID uint, blockNum uint64, dbTx pgx.Tx) error {
 	const updateBlocksSQL = "UPDATE sync.block SET block_hash = SUBSTRING(block_hash FROM 1 FOR LENGTH(block_hash)-1) || '\x61' WHERE network_id = $1 AND block_num >= $2"
@@ -569,10 +453,107 @@ func (p *PostgresStorage) UpdateBlocksForTesting(ctx context.Context, networkID 
 	return err
 }
 
-// UpdateBatchesForTesting updates raw_tx_data of batches.
-func (p *PostgresStorage) UpdateBatchesForTesting(ctx context.Context, batchNum uint64, dbTx pgx.Tx) error {
-	const updateBatchesSQL = "UPDATE sync.batch SET raw_tx_data = $1 WHERE batch_num >= $2"
-	_, err := p.getExecQuerier(dbTx).Exec(ctx, updateBatchesSQL, []byte{}, batchNum)
+// UpdateL1DepositsStatus updates the ready_for_claim status of L1 deposits.
+func (p *PostgresStorage) UpdateL1DepositsStatus(ctx context.Context, exitRoot []byte, dbTx pgx.Tx) ([]*etherman.Deposit, error) {
+	const updateDepositsStatusSQL = `UPDATE sync.deposit SET ready_for_claim = true 
+		WHERE deposit_cnt <=
+			(SELECT deposit_cnt FROM mt.root WHERE root = $1 AND network = 0) 
+			AND network_id = 0 AND ready_for_claim = false
+			RETURNING leaf_type, orig_net, orig_addr, amount, dest_net, dest_addr, deposit_cnt, block_id, network_id, tx_hash, metadata, ready_for_claim;`
+	rows, err := p.getExecQuerier(dbTx).Query(ctx, updateDepositsStatusSQL, exitRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	deposits := make([]*etherman.Deposit, 0, len(rows.RawValues()))
+	for rows.Next() {
+		var (
+			deposit etherman.Deposit
+			amount  string
+		)
+		err = rows.Scan(&deposit.LeafType, &deposit.OriginalNetwork, &deposit.OriginalAddress, &amount, &deposit.DestinationNetwork, &deposit.DestinationAddress, &deposit.DepositCount, &deposit.BlockID, &deposit.NetworkID, &deposit.TxHash, &deposit.Metadata, &deposit.ReadyForClaim)
+		if err != nil {
+			return nil, err
+		}
+		deposit.Amount, _ = new(big.Int).SetString(amount, 10) //nolint:gomnd
+		deposits = append(deposits, &deposit)
+	}
+	return deposits, nil
+}
+
+// UpdateL2DepositsStatus updates the ready_for_claim status of L2 deposits.
+func (p *PostgresStorage) UpdateL2DepositsStatus(ctx context.Context, exitRoot []byte, networkID uint, dbTx pgx.Tx) error {
+	const updateDepositsStatusSQL = `UPDATE sync.deposit SET ready_for_claim = true
+		WHERE deposit_cnt <=
+			(SELECT deposit_cnt FROM mt.root WHERE root = $1 AND network = $2)
+			AND network_id = $2 AND ready_for_claim = false;`
+	_, err := p.getExecQuerier(dbTx).Exec(ctx, updateDepositsStatusSQL, exitRoot, networkID)
+	return err
+}
+
+// AddClaimTx adds a claim monitored transaction to the storage.
+func (p *PostgresStorage) AddClaimTx(ctx context.Context, mTx ctmtypes.MonitoredTx, dbTx pgx.Tx) error {
+	const addMonitoredTxSQL = `INSERT INTO sync.monitored_txs 
+		(id, block_id, from_addr, to_addr, nonce, value, data, gas, status, history, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
+	_, err := p.getExecQuerier(dbTx).Exec(ctx, addMonitoredTxSQL, mTx.ID, mTx.BlockID, mTx.From, mTx.To, mTx.Nonce, mTx.Value.String(), mTx.Data, mTx.Gas, mTx.Status, pq.Array(mTx.HistoryHashSlice()), time.Now().UTC(), time.Now().UTC())
+	return err
+}
+
+// UpdateClaimTx updates a claim monitored transaction in the storage.
+func (p *PostgresStorage) UpdateClaimTx(ctx context.Context, mTx ctmtypes.MonitoredTx, dbTx pgx.Tx) error {
+	const updateMonitoredTxSQL = `UPDATE sync.monitored_txs 
+		SET block_id = $2
+		, from_addr = $3
+		, to_addr = $4
+		, nonce = $5
+		, value = $6
+		, data = $7
+		, gas = $8
+		, status = $9
+		, history = $10
+		, updated_at = $11
+		WHERE id = $1`
+	_, err := p.getExecQuerier(dbTx).Exec(ctx, updateMonitoredTxSQL, mTx.ID, mTx.BlockID, mTx.From, mTx.To, mTx.Nonce, mTx.Value.String(), mTx.Data, mTx.Gas, mTx.Status, pq.Array(mTx.HistoryHashSlice()), time.Now().UTC())
+	return err
+}
+
+// GetClaimTxsByStatus gets the monitored transactions by status.
+func (p *PostgresStorage) GetClaimTxsByStatus(ctx context.Context, statuses []ctmtypes.MonitoredTxStatus, dbTx pgx.Tx) ([]ctmtypes.MonitoredTx, error) {
+	const getMonitoredTxsSQL = "SELECT * FROM sync.monitored_txs WHERE status = ANY($1) ORDER BY created_at ASC"
+	rows, err := p.getExecQuerier(dbTx).Query(ctx, getMonitoredTxsSQL, pq.Array(statuses))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return []ctmtypes.MonitoredTx{}, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	mTxs := make([]ctmtypes.MonitoredTx, 0, len(rows.RawValues()))
+	for rows.Next() {
+		var (
+			value   string
+			history [][]byte
+		)
+		mTx := ctmtypes.MonitoredTx{}
+		err = rows.Scan(&mTx.ID, &mTx.BlockID, &mTx.From, &mTx.To, &mTx.Nonce, &value, &mTx.Data, &mTx.Gas, &mTx.Status, pq.Array(&history), &mTx.CreatedAt, &mTx.UpdatedAt)
+		if err != nil {
+			return mTxs, err
+		}
+		mTx.Value, _ = new(big.Int).SetString(value, 10) //nolint:gomnd
+		mTx.History = make(map[common.Hash]bool)
+		for _, h := range history {
+			mTx.History[common.BytesToHash(h)] = true
+		}
+		mTxs = append(mTxs, mTx)
+	}
+
+	return mTxs, nil
+}
+
+// UpdateDepositsStatusForTesting updates the ready_for_claim status of all deposits for testing.
+func (p *PostgresStorage) UpdateDepositsStatusForTesting(ctx context.Context, dbTx pgx.Tx) error {
+	const updateDepositsStatusSQL = "UPDATE sync.deposit SET ready_for_claim = true;"
+	_, err := p.getExecQuerier(dbTx).Exec(ctx, updateDepositsStatusSQL)
 	return err
 }
 
